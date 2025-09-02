@@ -1,20 +1,17 @@
-import os, sys, base64, yaml
+import os, base64, yaml
 from pathlib import Path
-from datetime import datetime
 
-# --- Zorg dat het projectroot in sys.path staat (handig voor lokaal draaien) ---
+# --- Geen sys.path hacks nodig als we als package draaien met -m ---
+
+from .utils.date_utils import now_in_tz, is_second_tuesday, yyyymm, yyyymmdd
+from .utils.io_utils import ensure_dir, write_json, read_json, write_csv
+from .msrc import fetch_vulnerabilities
+from .enrichers.kev import load_kev_set
+from .enrichers.epss import load_epss_scores
+from .templating import render_email
+from .mailer import send_html_mail
+
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-from src.utils.date_utils import now_in_tz, is_second_tuesday, yyyymm, yyyymmdd
-from src.utils.io_utils import ensure_dir, write_json, read_json, write_csv
-from src.msrc import fetch_vulnerabilities
-from src.enrichers.kev import load_kev_set
-from src.enrichers.epss import load_epss_scores
-from src.templating import render_email
-from src.mailer import send_html_mail
-
 OUTPUT = ROOT / "output"
 TEMPLATES = ROOT / "templates"
 
@@ -29,7 +26,6 @@ def filter_scope(rows, product_filters):
     out = []
     for r in rows:
         prod = (r.get("product") or "").lower()
-        # Houd items zonder product (RSS) ook aan boord zodat we niets missen
         if any(p in prod for p in pf) or prod == "":
             out.append(r)
     return out
@@ -112,7 +108,6 @@ def main():
 
     is_oob = False
     if newest and last_seen_date:
-        # OOB als er iets nieuws is en vandaag géén 2e dinsdag is
         is_oob = newest > last_seen_date and not second_tuesday
 
     # 6) Bepaal of we vandaag mailen
@@ -126,13 +121,10 @@ def main():
         "now": now,
         "is_patch_tuesday": second_tuesday,
         "is_oob": is_oob,
-        "counts": {
-            "total": len(rows),
-            "urgent": len(urgent_items),
-        },
-        "urgent": urgent_items[:30],  # kort in mail, rest in CSV
-        "all": rows[:500],            # safeguard
-        "urgent_cfg": urgent_cfg,     # voor template tekst
+        "counts": {"total": len(rows), "urgent": len(urgent_items)},
+        "urgent": urgent_items[:30],
+        "all": rows[:500],
+        "urgent_cfg": urgent_cfg,
     }
     html = render_email(str(Path(TEMPLATES)), "email.html.j2", context)
 
@@ -171,4 +163,11 @@ def main():
     print(f"CSV={csv_path}")
 
 if __name__ == "__main__":
-    main()
+    # Als iemand 'python src/main.py' draait i.p.v. '-m', dan is __package__ None.
+    # In dat geval zorgen we dat relatieve imports nog steeds werken:
+    if __package__ is None:
+        # fallback: import opnieuw als package
+        import runpy
+        runpy.run_module("src.main", run_name="__main__")
+    else:
+        main()
