@@ -22,21 +22,18 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # BELANGRIJK: zorg dat de repo-root in sys.path staat zodat 'python -m src.main' werkt
-      - name: Set PYTHONPATH
-        run: echo "PYTHONPATH=$GITHUB_WORKSPACE" >> $GITHUB_ENV
-
-      # (Optioneel maar handig) Toon structuur voor debug
-      - name: Tree (debug)
+      # (Optioneel) Debug stap om te zien of de package juist aanwezig is
+      - name: Debug folder layout
         run: |
-          python --version
+          echo "Repo root:"
           ls -la
-          find src -maxdepth 2 -type f -name "*.py" | sort
+          echo "Package structure:"
+          find patch_tuesday_reporter -maxdepth 2 -type f | sort
 
       - name: Run reporter
         env:
@@ -45,7 +42,7 @@ jobs:
           GRAPH_CLIENT_SECRET: ${{ secrets.GRAPH_CLIENT_SECRET }}
           MAIL_SENDER_UPN: ${{ secrets.MAIL_SENDER_UPN }}
           MSRC_API_KEY: ${{ secrets.MSRC_API_KEY }}   # optioneel
-        run: python -m src.main
+        run: python -m patch_tuesday_reporter.main
 
       - name: Upload outputs
         uses: actions/upload-artifact@v4
