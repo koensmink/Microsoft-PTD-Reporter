@@ -22,7 +22,9 @@
     {% if is_oob %}
       <span class="badge">Out-of-band</span>
     {% endif %}
-    <span class="badge">{{ org }}</span>
+    {% if org %}
+      <span class="badge">{{ org }}</span>
+    {% endif %}
   </p>
 
   <p>
@@ -31,7 +33,7 @@
   </p>
 
   {% if urgent|length > 0 %}
-  <h2>Urgent (KEV / CVSS ≥ cfg.min_cvss / EPSS ≥ cfg.min_epss)</h2>
+  <h2>Urgent (KEV / CVSS ≥ {{ urgent_cfg.min_cvss }} / EPSS ≥ {{ urgent_cfg.min_epss }})</h2>
   <table>
     <thead><tr>
       <th>CVE</th><th>Titel</th><th>Product</th><th>CVSS</th><th>EPSS</th><th>KEV</th><th>Link</th>
