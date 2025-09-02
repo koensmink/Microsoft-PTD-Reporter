@@ -1,7 +1,5 @@
 """
-MSRC data ophalen. Werkt met twee paden:
-1) API (vereist MSRC_API_KEY env) — rijker, stabieler.
-2) RSS fallback (geen key of fout) — minder rijk, maar bruikbaar.
+MSRC data ophalen via SUG v2 API (zonder API key) met RSS fallback.
 
 Uitvoer-normalisatie:
 [
@@ -17,33 +15,35 @@ Uitvoer-normalisatie:
   }, ...
 ]
 """
-
-import os, re, requests, xml.etree.ElementTree as ET
+import re, requests, xml.etree.ElementTree as ET
 from dateutil import parser
 
 API_BASE = "https://api.msrc.microsoft.com/sug/v2.0/en-US"
-API_VER  = "2022-01-01"  # kan wijzigen
-
-def _with_api_headers():
-    key = os.getenv("MSRC_API_KEY")
-    if not key:
-        return None
-    return {"api-key": key}
 
 def fetch_vulns_via_api(timeout=60) -> list[dict]:
-    headers = _with_api_headers()
-    if not headers:
-        return []
-
-    url = f"{API_BASE}/vulnerability?api-version={API_VER}"
+    """
+    Probeert de SUG v2 'vulnerability' endpoint zonder auth (API key niet meer vereist).
+    Als er toch een 401/403 komt, geven we [] terug (caller mag RSS proberen).
+    """
+    url = f"{API_BASE}/vulnerability"
     try:
-        r = requests.get(url, headers=headers, timeout=timeout)
+        r = requests.get(url, timeout=timeout, headers={"Accept": "application/json"})
+        # als MS throttled of tijdelijk 50x geeft, raise_for_status triggert except
         r.raise_for_status()
+    except requests.HTTPError as e:
+        code = getattr(e.response, "status_code", None)
+        print(f"WARN: SUG API HTTP {code}: {e}")
+        return []
     except Exception as e:
-        print(f"WARN: API call naar MSRC mislukt: {e}")
+        print(f"WARN: SUG API call mislukt: {e}")
         return []
 
-    data = r.json()
+    try:
+        data = r.json()
+    except Exception as e:
+        print(f"WARN: SUG API gaf geen JSON: {e}")
+        return []
+
     vulns = []
     for item in data.get("value", []):
         cve = item.get("cveNumber") or item.get("cve")
@@ -81,6 +81,9 @@ def fetch_vulns_via_api(timeout=60) -> list[dict]:
     return vulns
 
 def fetch_vulns_via_rss(timeout=60) -> list[dict]:
+    """
+    Robuuste RSS fallback (sommige omgevingen krijgen HTML/redirects terug).
+    """
     rss_url = "https://msrc.microsoft.com/update-guide/rss"
     try:
         r = requests.get(rss_url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"})
@@ -90,10 +93,9 @@ def fetch_vulns_via_rss(timeout=60) -> list[dict]:
         return []
 
     text = r.text.strip()
-
-    # Quick sanity check: RSS zou XML moeten zijn
+    # Sanity check: verwacht XML, niet HTML
     if not text.startswith("<?xml") and "<rss" not in text.lower():
-        print("WARN: RSS feed is geen geldige XML (waarschijnlijk HTML ontvangen).")
+        print("WARN: RSS geen geldige XML (waarschijnlijk HTML ontvangen).")
         return []
 
     try:
@@ -130,11 +132,13 @@ def fetch_vulns_via_rss(timeout=60) -> list[dict]:
     return vulns
 
 def fetch_vulnerabilities() -> list[dict]:
-    """Probeer eerst API, anders RSS fallback."""
-    vulns = fetch_vulns_via_api()
-    if vulns:
-        print(f"INFO: {len(vulns)} items geladen via MSRC API")
-        return vulns
-    vulns = fetch_vulns_via_rss()
-    print(f"INFO: {len(vulns)} items geladen via RSS fallback")
-    return vulns
+    """
+    Eerst SUG v2 API proberen (zonder key); als dat niets oplevert, RSS fallback.
+    """
+    api = fetch_vulns_via_api()
+    if api:
+        print(f"INFO: {len(api)} items geladen via SUG v2 API (zonder key).")
+        return api
+    rss = fetch_vulns_via_rss()
+    print(f"INFO: {len(rss)} items geladen via RSS fallback.")
+    return rss
