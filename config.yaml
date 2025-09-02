@@ -1,0 +1,23 @@
+org_name: "ACME"
+timezone: "Europe/Amsterdam"
+
+# Scope: filter op productnaam (substring match, case-insensitive). Leeg = alles.
+product_filters:
+  - "Windows"
+  - "Server"
+  - "Exchange"
+  - ".NET"
+
+# Urgent criteria
+urgent:
+  min_cvss: 8.0
+  min_epss: 0.30
+  include_kev: true
+
+# Mail instellingen
+mail:
+  subject_prefix: "[Security] Microsoft Patch Tuesday"
+  to: ["secops@example.com", "it-ops@example.com"]
+  cc: []
+  bcc: []
+  include_csv_attachment: true
