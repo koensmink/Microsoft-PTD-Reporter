@@ -1,7 +1,12 @@
-import os, base64, yaml
+import os, sys, base64, yaml
 from pathlib import Path
 from datetime import datetime
-from dateutil import tz
+
+# --- Zorg dat het projectroot in sys.path staat (handig voor lokaal draaien) ---
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from src.utils.date_utils import now_in_tz, is_second_tuesday, yyyymm, yyyymmdd
 from src.utils.io_utils import ensure_dir, write_json, read_json, write_csv
 from src.msrc import fetch_vulnerabilities
@@ -10,7 +15,6 @@ from src.enrichers.epss import load_epss_scores
 from src.templating import render_email
 from src.mailer import send_html_mail
 
-ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "output"
 TEMPLATES = ROOT / "templates"
 
@@ -25,6 +29,7 @@ def filter_scope(rows, product_filters):
     out = []
     for r in rows:
         prod = (r.get("product") or "").lower()
+        # Houd items zonder product (RSS) ook aan boord zodat we niets missen
         if any(p in prod for p in pf) or prod == "":
             out.append(r)
     return out
@@ -63,6 +68,10 @@ def attach_csv_bytes(name: str, rows: list, headers: list) -> dict:
         "contentType": "text/csv",
     }
 
+def graph_env_complete() -> bool:
+    required = ["GRAPH_TENANT_ID", "GRAPH_CLIENT_ID", "GRAPH_CLIENT_SECRET", "MAIL_SENDER_UPN"]
+    return all(os.environ.get(k) for k in required)
+
 def main():
     cfg = load_config()
     tzname = cfg.get("timezone", "Europe/Amsterdam")
@@ -76,8 +85,10 @@ def main():
 
     # 1) Data ophalen
     vulns = fetch_vulnerabilities()
+
     # 2) Scope filteren
     vulns = filter_scope(vulns, cfg.get("product_filters", []))
+
     # 3) Verrijken
     kev_set = load_kev_set()
     epss_map = load_epss_scores()
@@ -93,16 +104,15 @@ def main():
     write_csv(csv_path, csv_rows, fields)
 
     # 5) OOB-detectie
-    # Vind nieuwste published in set
     newest = None
     for r in rows:
         p = r.get("published")
         if p:
             newest = max(newest, p) if newest else p
+
     is_oob = False
     if newest and last_seen_date:
-        # OOB als er iets nieuws is op een andere dag dan een 2e dinsdag
-        # (we sturen sowieso bij nieuwe dag; de mailtekst vermeldt OOB als het niet op 2e dinsdag is)
+        # OOB als er iets nieuws is en vandaag géén 2e dinsdag is
         is_oob = newest > last_seen_date and not second_tuesday
 
     # 6) Bepaal of we vandaag mailen
@@ -110,6 +120,7 @@ def main():
 
     # 7) Render HTML
     urgent_items = [r for r in rows if r.get("urgent")]
+    urgent_cfg = cfg.get("urgent", {})
     context = {
         "org": cfg.get("org_name", ""),
         "now": now,
@@ -121,10 +132,11 @@ def main():
         },
         "urgent": urgent_items[:30],  # kort in mail, rest in CSV
         "all": rows[:500],            # safeguard
+        "urgent_cfg": urgent_cfg,     # voor template tekst
     }
     html = render_email(str(Path(TEMPLATES)), "email.html.j2", context)
 
-    # 8) Stuur e-mail (alleen op tweede dinsdag of OOB)
+    # 8) Stuur e-mail (alleen op tweede dinsdag of OOB) én alleen als Graph secrets compleet zijn
     if should_mail:
         subject_prefix = cfg.get("mail", {}).get("subject_prefix", "[Security] Patch Tuesday")
         subject = f"{subject_prefix} — {now.strftime('%Y-%m')} — {context['counts']['urgent']}/{context['counts']['total']} ({cfg.get('org_name','')})"
@@ -133,18 +145,21 @@ def main():
         if cfg.get("mail", {}).get("include_csv_attachment", True):
             attachments.append(attach_csv_bytes(csv_path.name, csv_rows, fields))
 
-        send_html_mail(
-            tenant_id=os.environ["GRAPH_TENANT_ID"],
-            client_id=os.environ["GRAPH_CLIENT_ID"],
-            client_secret=os.environ["GRAPH_CLIENT_SECRET"],
-            sender_upn=os.environ["MAIL_SENDER_UPN"],
-            subject=subject,
-            html_body=html,
-            to=cfg.get("mail", {}).get("to", []),
-            cc=cfg.get("mail", {}).get("cc", []),
-            bcc=cfg.get("mail", {}).get("bcc", []),
-            attachments=attachments
-        )
+        if graph_env_complete():
+            send_html_mail(
+                tenant_id=os.environ["GRAPH_TENANT_ID"],
+                client_id=os.environ["GRAPH_CLIENT_ID"],
+                client_secret=os.environ["GRAPH_CLIENT_SECRET"],
+                sender_upn=os.environ["MAIL_SENDER_UPN"],
+                subject=subject,
+                html_body=html,
+                to=cfg.get("mail", {}).get("to", []),
+                cc=cfg.get("mail", {}).get("cc", []),
+                bcc=cfg.get("mail", {}).get("bcc", []),
+                attachments=attachments
+            )
+        else:
+            print("WARN: Graph secrets ontbreken; mail wordt niet verstuurd. Artifact en outputs zijn wel gegenereerd.")
 
     # 9) Update state
     if newest and (not last_seen_date or newest > last_seen_date):
