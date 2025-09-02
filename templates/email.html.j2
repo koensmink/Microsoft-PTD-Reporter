@@ -1,0 +1,81 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Patch Tuesday {{ now.strftime('%Y-%m') }}</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    .badge { display:inline-block; padding:2px 8px; border-radius:999px; background:#eee; font-size:12px; }
+    table { border-collapse: collapse; width:100%; }
+    th, td { border:1px solid #ddd; padding:8px; font-size:14px; }
+    th { background:#f6f8fa; text-align:left; }
+    h2 { margin-top: 28px; }
+    .urgent { background:#fff5f5; }
+  </style>
+</head>
+<body>
+  <h1>Microsoft Security Updates — {{ now.strftime('%B %Y') }}</h1>
+  <p>
+    {% if is_patch_tuesday %}
+      <span class="badge">Patch Tuesday</span>
+    {% endif %}
+    {% if is_oob %}
+      <span class="badge">Out-of-band</span>
+    {% endif %}
+    <span class="badge">{{ org }}</span>
+  </p>
+
+  <p>
+    Totaal: <b>{{ counts.total }}</b> updates —
+    Urgent: <b>{{ counts.urgent }}</b>
+  </p>
+
+  {% if urgent|length > 0 %}
+  <h2>Urgent (KEV / CVSS ≥ cfg.min_cvss / EPSS ≥ cfg.min_epss)</h2>
+  <table>
+    <thead><tr>
+      <th>CVE</th><th>Titel</th><th>Product</th><th>CVSS</th><th>EPSS</th><th>KEV</th><th>Link</th>
+    </tr></thead>
+    <tbody>
+    {% for r in urgent %}
+      <tr class="urgent">
+        <td>{{ r.cve }}</td>
+        <td>{{ r.title }}</td>
+        <td>{{ r.product }}</td>
+        <td>{{ r.cvss if r.cvss is not none else "" }}</td>
+        <td>{{ "%.2f"|format(r.epss) if r.epss else "" }}</td>
+        <td>{{ "Yes" if r.kev else "" }}</td>
+        <td><a href="{{ r.url }}">Update Guide</a></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  <h2>Volledige lijst (subset)</h2>
+  <table>
+    <thead><tr>
+      <th>CVE</th><th>Titel</th><th>Product</th><th>Severity</th><th>CVSS</th><th>EPSS</th><th>KB</th><th>Datum</th><th>Link</th>
+    </tr></thead>
+    <tbody>
+    {% for r in all %}
+      <tr>
+        <td>{{ r.cve }}</td>
+        <td>{{ r.title }}</td>
+        <td>{{ r.product }}</td>
+        <td>{{ r.severity }}</td>
+        <td>{{ r.cvss if r.cvss is not none else "" }}</td>
+        <td>{{ "%.2f"|format(r.epss) if r.epss else "" }}</td>
+        <td>{{ r.kb }}</td>
+        <td>{{ r.published }}</td>
+        <td><a href="{{ r.url }}">Update Guide</a></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+
+  <p style="margin-top:28px;">
+    CSV met de volledige set is als bijlage toegevoegd (en staat ook in de repo artifacts).
+  </p>
+</body>
+</html>
