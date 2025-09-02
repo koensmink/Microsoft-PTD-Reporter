@@ -1,7 +1,7 @@
 """
 MSRC data ophalen. Werkt met twee paden:
 1) API (vereist MSRC_API_KEY env) — rijker, stabieler.
-2) RSS fallback (geen key): voldoende voor titels, CVE's en links.
+2) RSS fallback (geen key of fout) — minder rijk, maar bruikbaar.
 
 Uitvoer-normalisatie:
 [
@@ -17,11 +17,12 @@ Uitvoer-normalisatie:
   }, ...
 ]
 """
+
 import os, re, requests, xml.etree.ElementTree as ET
 from dateutil import parser
 
 API_BASE = "https://api.msrc.microsoft.com/sug/v2.0/en-US"
-API_VER  = "2022-01-01"  # kan door MS wijzigen
+API_VER  = "2022-01-01"  # kan wijzigen
 
 def _with_api_headers():
     key = os.getenv("MSRC_API_KEY")
@@ -35,8 +36,13 @@ def fetch_vulns_via_api(timeout=60) -> list[dict]:
         return []
 
     url = f"{API_BASE}/vulnerability?api-version={API_VER}"
-    r = requests.get(url, headers=headers, timeout=timeout)
-    r.raise_for_status()
+    try:
+        r = requests.get(url, headers=headers, timeout=timeout)
+        r.raise_for_status()
+    except Exception as e:
+        print(f"WARN: API call naar MSRC mislukt: {e}")
+        return []
+
     data = r.json()
     vulns = []
     for item in data.get("value", []):
@@ -54,7 +60,7 @@ def fetch_vulns_via_api(timeout=60) -> list[dict]:
         if published:
             try:
                 published_dt = parser.parse(published).date().isoformat()
-            except:
+            except Exception:
                 published_dt = None
         else:
             published_dt = None
@@ -76,9 +82,26 @@ def fetch_vulns_via_api(timeout=60) -> list[dict]:
 
 def fetch_vulns_via_rss(timeout=60) -> list[dict]:
     rss_url = "https://msrc.microsoft.com/update-guide/rss"
-    r = requests.get(rss_url, timeout=timeout)
-    r.raise_for_status()
-    root = ET.fromstring(r.text)
+    try:
+        r = requests.get(rss_url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+    except Exception as e:
+        print(f"WARN: RSS ophalen mislukt: {e}")
+        return []
+
+    text = r.text.strip()
+
+    # Quick sanity check: RSS zou XML moeten zijn
+    if not text.startswith("<?xml") and "<rss" not in text.lower():
+        print("WARN: RSS feed is geen geldige XML (waarschijnlijk HTML ontvangen).")
+        return []
+
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError as e:
+        print(f"WARN: Fout bij parsen RSS: {e}")
+        return []
+
     items = root.findall(".//item")
     vulns = []
     for it in items:
@@ -87,7 +110,7 @@ def fetch_vulns_via_rss(timeout=60) -> list[dict]:
         pub = (it.findtext("pubDate") or "").strip()
         try:
             published_dt = parser.parse(pub).date().isoformat()
-        except:
+        except Exception:
             published_dt = None
 
         m = re.search(r"(CVE-\d{4}-\d+)", title, re.IGNORECASE)
@@ -107,5 +130,11 @@ def fetch_vulns_via_rss(timeout=60) -> list[dict]:
     return vulns
 
 def fetch_vulnerabilities() -> list[dict]:
-    api = fetch_vulns_via_api()
-    return api if api else fetch_vulns_via_rss()
+    """Probeer eerst API, anders RSS fallback."""
+    vulns = fetch_vulns_via_api()
+    if vulns:
+        print(f"INFO: {len(vulns)} items geladen via MSRC API")
+        return vulns
+    vulns = fetch_vulns_via_rss()
+    print(f"INFO: {len(vulns)} items geladen via RSS fallback")
+    return vulns
