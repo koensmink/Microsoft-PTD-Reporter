@@ -1,0 +1,42 @@
+name: Patch Tuesday Reporter
+
+on:
+  schedule:
+    - cron: '30 17 * * *'   # Dagelijks 17:30 UTC (19:30 NL in winter, 19:30/19:30 afhankelijk DST)
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run reporter
+        env:
+          GRAPH_TENANT_ID: ${{ secrets.GRAPH_TENANT_ID }}
+          GRAPH_CLIENT_ID: ${{ secrets.GRAPH_CLIENT_ID }}
+          GRAPH_CLIENT_SECRET: ${{ secrets.GRAPH_CLIENT_SECRET }}
+          MAIL_SENDER_UPN: ${{ secrets.MAIL_SENDER_UPN }}
+          MSRC_API_KEY: ${{ secrets.MSRC_API_KEY }}   # optioneel
+        run: python -m src.main
+
+      - name: Upload outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: patch-tuesday-output
+          path: |
+            output/**
