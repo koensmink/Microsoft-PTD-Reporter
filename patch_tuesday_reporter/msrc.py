@@ -1,31 +1,32 @@
-# patch_tuesday_reporter/msrc.py
 """
-SUG v2 API (zonder key) + CVRF v3.0 enrichment + robuuste RSS fallback.
+SUG v2 API (zonder key) + sterke CVRF v3.0 enrichment + NVD fallback voor CVSS/Severity + RSS fallback.
 
-Output rows:
+Output per row:
 {
   "cve": "CVE-2025-XXXX",
   "title": "...",
-  "product": "Windows Server, ...",
+  "product": "Windows ...",
   "cvss": 7.8,
-  "severity": "Critical|Important|...",
+  "severity": "Critical|Important|High|Medium|Low",
   "published": "YYYY-MM-DD",
-  "kb": "KB5031234, KB5035678",
+  "kb": "KB5031234, ...",
   "url": "https://msrc.microsoft.com/update-guide/vulnerability/CVE-..."
 }
 """
-import re, requests, xml.etree.ElementTree as ET
+from __future__ import annotations
+import re, time, requests, xml.etree.ElementTree as ET
 from collections import defaultdict
 from dateutil import parser
 
-API_BASE = "https://api.msrc.microsoft.com/sug/v2.0/en-US"
-LIST_URL = f"{API_BASE}/vulnerability"
+from .enrichers.nvd import enrich_many as nvd_enrich
+
+API_BASE   = "https://api.msrc.microsoft.com/sug/v2.0/en-US"
+LIST_URL   = f"{API_BASE}/vulnerability"
 DETAIL_URL = f"{API_BASE}/vulnerability/{{cve}}"
+CVRF_BASE  = "https://api.msrc.microsoft.com/cvrf/v3.0/cvrf"
+RSS_URL    = "https://api.msrc.microsoft.com/update-guide/rss"
 
-CVRF_BASE = "https://api.msrc.microsoft.com/cvrf/v3.0/cvrf"  # e.g. /2025-Aug
-RSS_URL   = "https://api.msrc.microsoft.com/update-guide/rss"
-
-# ----------------- kleine helpers -----------------
+# ---------------- helpers ----------------
 
 def _try_float(x):
     try: return float(x) if x not in (None, "") else None
@@ -45,7 +46,7 @@ def _norm_kb(kb):
             if isinstance(item, str):
                 vals.append(item)
             elif isinstance(item, dict):
-                for k in ("kbid", "kb", "id", "value"):
+                for k in ("kbid","kb","id","value","KB"):
                     if item.get(k):
                         vals.append(str(item[k])); break
         return ", ".join(sorted(set(vals)))
@@ -60,20 +61,21 @@ def _norm_products(prod, products):
 
 def _derive_product_from_title(title: str) -> str:
     t = (title or "").lower()
-    if t.startswith("chromium:"): return "Microsoft Edge (Chromium-based)"
+    if t.startswith("chromium:") or "edge (chromium" in t or "chromium-based" in t:
+        return "Microsoft Edge (Chromium-based)"
     if "sql server" in t: return "Microsoft SQL Server"
     if "exchange server" in t: return "Microsoft Exchange Server"
     if "sharepoint" in t: return "Microsoft SharePoint"
-    if "windows" in t: return "Windows"
-    if "office" in t or "word " in t or "excel " in t or "powerpoint" in t or "visio" in t:
-        return "Microsoft Office"
-    if "teams" in t: return "Microsoft Teams"
     if "azure" in t: return "Microsoft Azure"
+    if "teams" in t: return "Microsoft Teams"
+    if "windows" in t: return "Windows"
+    if any(w in t for w in ["office", "word ", "excel ", "powerpoint", "visio"]):
+        return "Microsoft Office"
     return ""
 
-# ----------------- SUG v2 list + detail -----------------
+# --------------- SUG list + detail ---------------
 
-def fetch_vulns_via_api(timeout=60, max_pages=10, page_size=1000) -> list[dict]:
+def fetch_vulns_via_api(timeout=60, max_pages=8, page_size=1000) -> list[dict]:
     select = ",".join([
         "cveNumber","title","severity","cvssScore","product","products",
         "kbArticles","publishDate","publishedDate","vulnTitle"
@@ -92,6 +94,7 @@ def fetch_vulns_via_api(timeout=60, max_pages=10, page_size=1000) -> list[dict]:
         all_items.extend(data.get("value", []))
         url = data.get("@odata.nextLink")
         pages += 1
+        time.sleep(0.15)  # gebalanceerd op CI
 
     out, needs_detail = [], []
     for it in all_items:
@@ -109,24 +112,23 @@ def fetch_vulns_via_api(timeout=60, max_pages=10, page_size=1000) -> list[dict]:
             "cvss": cvss, "severity": severity, "published": published,
             "kb": kb, "url": f"https://msrc.microsoft.com/update-guide/vulnerability/{cve}"
         }
-        if not title or not product or not published or (severity == "" and cvss is None and kb == ""):
+        if not title or not product or not published or (not severity and cvss is None and not kb):
             needs_detail.append((cve, row))
         out.append(row)
 
-    # detail calls (cap op 200 om throttling te beperken)
     for cve, row in needs_detail[:200]:
         try:
             d = _fetch_detail(cve, timeout=timeout)
             if not d: continue
-            row["title"] = row["title"] or d.get("title","") or d.get("vulnTitle","")
-            row["severity"] = row["severity"] or (d.get("severity") or "").strip()
-            row["cvss"] = row["cvss"] if row["cvss"] is not None else _try_float(d.get("cvssScore"))
-            row["product"] = row["product"] or _norm_products(d.get("product"), d.get("products"))
-            row["kb"] = row["kb"] or _norm_kb(d.get("kbArticles"))
+            row["title"]     = row["title"] or d.get("title","") or d.get("vulnTitle","")
+            row["severity"]  = row["severity"] or (d.get("severity") or "").strip()
+            row["cvss"]      = row["cvss"] if row["cvss"] is not None else _try_float(d.get("cvssScore"))
+            row["product"]   = row["product"] or _norm_products(d.get("product"), d.get("products"))
+            row["kb"]        = row["kb"] or _norm_kb(d.get("kbArticles"))
             row["published"] = row["published"] or _iso_date(d.get("publishDate") or d.get("publishedDate"))
         except Exception as e:
             print(f"WARN: detail {cve} mislukt: {e}")
-
+        time.sleep(0.1)
     return out
 
 def _fetch_detail(cve: str, timeout=30) -> dict | None:
@@ -136,14 +138,13 @@ def _fetch_detail(cve: str, timeout=30) -> dict | None:
     r.raise_for_status()
     return r.json()
 
-# ----------------- CVRF enrichment -----------------
+# --------------- CVRF enrichment (product/kb/cvss/severity waar mogelijk) ---------------
 
 def _cvrf_doc_id(iso_date: str) -> str | None:
     if not iso_date: return None
-    # verwacht 'YYYY-MM-DD' → 'YYYY-Mon' (Engelse maand afk.)
     try:
         dt = parser.parse(iso_date)
-        return dt.strftime("%Y-%b")  # e.g., 2025-Aug
+        return dt.strftime("%Y-%b")  # bijv. 2025-Aug
     except: return None
 
 def _fetch_cvrf_xml(doc_id: str, timeout=60) -> ET.Element | None:
@@ -154,10 +155,9 @@ def _fetch_cvrf_xml(doc_id: str, timeout=60) -> ET.Element | None:
     except Exception as e:
         print(f"WARN: CVRF {doc_id} ophalen mislukt: {e}")
         return None
-
     txt = r.text.strip()
     if not txt.startswith("<?xml") and "<cvrf:document" not in txt.lower():
-        print(f"WARN: CVRF {doc_id} lijkt geen XML.")
+        print(f"WARN: CVRF {doc_id} geen XML.")
         return None
     try:
         return ET.fromstring(txt)
@@ -166,8 +166,8 @@ def _fetch_cvrf_xml(doc_id: str, timeout=60) -> ET.Element | None:
         return None
 
 def _cvrf_build_maps(root: ET.Element):
-    ns = {"cvrf":"http://www.icasi.org/CVRF/schema/v1.1"}  # MS gebruikt nog steeds deze namespace in v3 endpoint
-    # ProductTree: map ID -> FullProductName
+    ns = {"cvrf":"http://www.icasi.org/CVRF/schema/v1.1"}
+
     pid_to_name = {}
     for fp in root.findall(".//cvrf:FullProductName", ns):
         pid = fp.get("ProductID")
@@ -175,32 +175,48 @@ def _cvrf_build_maps(root: ET.Element):
         if pid and name:
             pid_to_name[pid] = name
 
-    # Vulnerabilities: map CVE -> set(ProductIDs), CVSS/Severity, KBs
     vulns = {}
     for v in root.findall(".//cvrf:Vulnerability", ns):
         cve = (v.findtext("cvrf:CVE", default="", namespaces=ns) or "").strip().upper()
         if not cve: continue
-        prod_ids = set()
-        for e in v.findall(".//cvrf:ProductID", ns):
-            if e.text: prod_ids.add(e.text.strip())
 
-        # CVSS base score (v2/v3 kunnen beide voorkomen)
+        prod_ids = set()
+        for pid in v.findall(".//cvrf:ProductStatuses/cvrf:Status/cvrf:ProductID", ns):
+            if pid.text: prod_ids.add(pid.text.strip())
+        if not prod_ids:
+            for pid in v.findall(".//cvrf:ProductID", ns):
+                if pid.text: prod_ids.add(pid.text.strip())
+
+        # CVSS
         cvss = None
         for score in v.findall(".//cvrf:BaseScore", ns):
             cvss = _try_float(score.text)
             if cvss is not None: break
+        if cvss is None:
+            for score in v.findall(".//cvrf:CVSSScoreSets//cvrf:CVSSScoreSet//cvrf:BaseScore", ns):
+                cvss = _try_float(score.text)
+                if cvss is not None: break
 
-        # Severity – MS gebruikt vaak 'Threats/Threat/Description' of 'CVSSSeverity'
+        # Severity
         severity = v.findtext(".//cvrf:CVSSSeverity", default="", namespaces=ns) or ""
         severity = severity.strip()
+        if not severity:
+            for th in v.findall(".//cvrf:Threats/cvrf:Threat", ns):
+                ttype = (th.findtext("cvrf:Type", default="", namespaces=ns) or "").strip().lower()
+                if ttype in ("impact","severity"):
+                    desc = th.findtext("cvrf:Description", default="", namespaces=ns) or ""
+                    m = re.search(r"\b(Critical|Important|Moderate|Low|High|Medium)\b", desc, re.IGNORECASE)
+                    if m:
+                        severity = m.group(1).capitalize()
+                        break
 
-        # KB’s – vaak in Remediations/Description of URL
+        # KB’s
         kb_set = set()
-        for desc in v.findall(".//cvrf:Remediations//cvrf:Description", ns):
-            for m in re.findall(r"KB\d{7,}", (desc.text or "")):
+        for node in v.findall(".//cvrf:Remediations//cvrf:Description", ns) + v.findall(".//cvrf:Remediations//cvrf:URL", ns):
+            for m in re.findall(r"KB\d{7,}", (node.text or "")):
                 kb_set.add(m)
-        for url in v.findall(".//cvrf:Remediations//cvrf:URL", ns):
-            for m in re.findall(r"KB\d{7,}", (url.text or "")):
+        for note in v.findall(".//cvrf:Notes/cvrf:Note", ns):
+            for m in re.findall(r"KB\d{7,}", (note.text or "")):
                 kb_set.add(m)
 
         vulns[cve] = {
@@ -212,7 +228,6 @@ def _cvrf_build_maps(root: ET.Element):
     return pid_to_name, vulns
 
 def enrich_with_cvrf(rows: list[dict]) -> list[dict]:
-    # Groepeer per maand-ID en verrijk ontbrekende velden
     by_doc = defaultdict(list)
     for r in rows:
         doc_id = _cvrf_doc_id(r.get("published"))
@@ -221,43 +236,56 @@ def enrich_with_cvrf(rows: list[dict]) -> list[dict]:
 
     for doc_id, items in by_doc.items():
         root = _fetch_cvrf_xml(doc_id)
-        if not root: 
-            # fallback: zet afgeleide product voor Chromium/Windows etc.
+        if not root:
             for r in items:
                 if not r.get("product"):
                     r["product"] = _derive_product_from_title(r.get("title",""))
             continue
-        pid_to_name, cvrf_map = _cvrf_build_maps(root)
 
+        pid_to_name, cvrf_map = _cvrf_build_maps(root)
         for r in items:
-            cve = r["cve"]
-            info = cvrf_map.get(cve)
+            info = cvrf_map.get(r["cve"])
             if not info:
-                # geen match in CVRF → heuristiek voor product
                 if not r.get("product"):
                     r["product"] = _derive_product_from_title(r.get("title",""))
                 continue
 
-            # Producten mappen
             if not r.get("product") and info["product_ids"]:
                 names = [pid_to_name.get(pid) for pid in info["product_ids"] if pid_to_name.get(pid)]
                 if names:
                     r["product"] = ", ".join(sorted(set(names)))
 
-            # KB’s aanvullen
-            if not r.get("kb"):
+            if not r.get("kb") and info["kbs"]:
                 r["kb"] = info["kbs"]
 
-            # CVSS/Severity aanvullen wanneer leeg
             if r.get("cvss") is None and info["cvss"] is not None:
                 r["cvss"] = info["cvss"]
+
             if not r.get("severity") and info["severity"]:
                 r["severity"] = info["severity"]
 
-            # Als published leeg was, laat zoals is (SUG geeft dat meestal wel)
     return rows
 
-# ----------------- RSS fallback -----------------
+# --------------- NVD fallback voor CVSS/Severity ---------------
+
+def enrich_with_nvd(rows: list[dict]) -> list[dict]:
+    need = [r["cve"] for r in rows if (r.get("cvss") is None or not r.get("severity"))]
+    if not need:
+        return rows
+    nvd_map = nvd_enrich(need, delay_sec=0.2)
+    for r in rows:
+        info = nvd_map.get(r["cve"])
+        if not info:
+            continue
+        if r.get("cvss") is None and info.get("cvss") is not None:
+            r["cvss"] = info["cvss"]
+        if not r.get("severity") and info.get("severity"):
+            # Harmoniseer NVD (HIGH/MEDIUM/LOW/CRITICAL) naar MS-stijl waar logisch
+            sev = info["severity"].capitalize()
+            r["severity"] = "Critical" if sev == "Critical" else "Important" if sev == "High" else "Moderate" if sev == "Medium" else "Low" if sev == "Low" else sev
+    return rows
+
+# --------------- RSS fallback ---------------
 
 def fetch_vulns_via_rss(timeout=60) -> list[dict]:
     try:
@@ -283,7 +311,7 @@ def fetch_vulns_via_rss(timeout=60) -> list[dict]:
     for it in items:
         title = (it.findtext("title") or "").strip()
         link = (it.findtext("link") or "").strip()
-        pub = (it.findtext("pubDate") or "").strip()
+        pub  = (it.findtext("pubDate") or "").strip()
         published_dt = _iso_date(pub)
         m = re.search(r"(CVE-\d{4}-\d+)", title, re.IGNORECASE)
         cve = m.group(1).upper() if m else None
@@ -297,14 +325,12 @@ def fetch_vulns_via_rss(timeout=60) -> list[dict]:
         })
     return vulns
 
-# ----------------- publieke entrypoint -----------------
+# --------------- entrypoint ---------------
 
 def fetch_vulnerabilities() -> list[dict]:
-    # 1) SUG lijst + detail
     rows = fetch_vulns_via_api()
-    # 2) CVRF enrich voor missende velden
-    rows = enrich_with_cvrf(rows)
-    # 3) Als SUG niets gaf, fallback op RSS
+    rows = enrich_with_cvrf(rows)   # product/kb/cvss/severity waar mogelijk
+    rows = enrich_with_nvd(rows)    # wat nog leeg is: vul met NVD
     if not rows:
         rows = fetch_vulns_via_rss()
     print(f"INFO: totaal {len(rows)} items na enrichment.")
