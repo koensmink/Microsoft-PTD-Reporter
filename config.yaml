@@ -21,3 +21,10 @@ mail:
   cc: []
   bcc: []
   include_csv_attachment: true
+
+# 
+data_quality:
+  min_completeness_pct: 70
+  force_detail_on_patch_tuesday: true
+  force_detail_on_oob: true
+  detail_max: 1000
